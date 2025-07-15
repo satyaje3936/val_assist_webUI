@@ -15,7 +15,7 @@ import tiktoken
 import httpx
 import pandas as pd
 from datetime import datetime
-
+import traceback
 # Initialize logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -58,13 +58,14 @@ class FCCBAnalyzer:
                 return {"error": "HSD Handler not available"}
                 
             # Get HSD details with specific fields for FCCB analysis
-            fields = [
-                "id", "title", "description", "component", "die_name", 
-                "fuse_name", "old_value", "new_value", "justification",
-                "validation_status", "assignee", "status", "created_date"
-            ]
+            # fields = [
+            #     "id", "title", "description", "component", "die_name", 
+            #     "fuse_name", "old_value", "new_value", "justification",
+            #     "validation_status", "assignee", "status", "created_date"
+            # ]
             
-            hsd_details = self.hsd_handler.hsd.get_hsd(hsd_id, fields)
+            # hsd_details = self.hsd_handler.hsd.get_hsd(hsd_id, fields)
+            hsd_details = self.hsd_handler.hsd.get_hsd(hsd_id)
             # If HSD details are not found, return error
             if not hsd_details:
                 return {"error": "HSD details not found"}
@@ -85,11 +86,16 @@ class FCCBAnalyzer:
             system_prompt = """You are an expert FCCB (Fuse Configuration Control Board) analyst with deep knowledge of Intel fuse configurations. 
             Your task is to analyze HSD data and extract the following information:
             1. Exact fuse name (usually in format like sv.socket0.io0.fuses.punit_fuses.fuse_name)
-            2. Die/Component it belongs to (socket, IO die, etc.)
+            2. Die/Component it belongs to (must be in format socket0.io0, socket0.io1, socket0.compute0, socket0.compute1, etc.)
             3. Old/existing fuse value (usually in hex format like 0x5)
             4. New/expected/requested fuse value (usually in hex format like 0x69)
             5. Reason for the change (bug fix, feature enabling, etc.)
             6. Validation impact
+            
+            IMPORTANT: For die_component field, always use the standardized socket notation format:
+            - For IO dies: socket0.io0, socket0.io1, socket1.io0, etc.
+            - For Compute dies: socket0.compute0, socket0.compute1, socket1.compute0, etc.
+            - Extract this from the fuse path or HSD description/title
             
             Look for patterns like:
             - "Existing Fuse values" followed by fuse path and value
@@ -122,20 +128,26 @@ class FCCBAnalyzer:
                 "old_value": "current/existing fuse value (e.g., 0x5)",
                 "new_value": "requested/expected new fuse value (e.g., 0x69)",
                 "full_fuse_path": "complete fuse path (e.g., sv.socket0.io0.fuses.punit_fuses.pcode_sst_bf_config_0_t_throttle)",
-                "die_component": "die or component name (e.g., socket0.io0, CPU die, compute die IO die, etc.)",
+                "die_component": "standardized socket notation (e.g., socket0.io0, socket0.io1, socket0.compute0, socket0.compute1)",
                 "change_reason": "reason for the change (e.g., bug fix, feature enabling)",
                 "validation_impact": "impact on validation and testing",
                 "functionality": "what this fuse controls or affects",
                 "confidence_score": "0.0 to 1.0 based on clarity of information"
             }}
             
+            CRITICAL: For die_component field, ALWAYS use the exact socket notation format:
+            - Extract from fuse path: if path contains "socket0.io0" → use "socket0.io0"
+            - Extract from fuse path: if path contains "socket0.compute0" → use "socket0.compute0"
+            - Look in title/description for terms like "IO-DIE", "COMPUTE-DIE", "XCC", "IOD"
+            - Map to standardized format: IO die → socket0.io0, Compute die → socket0.compute0
+            
             Look specifically for:
-            - Fuse paths starting with "sv.socket"
+            - Fuse paths starting with "sv.socket" (extract socket notation from path)
             - "Existing Fuse values" and "Expected Fuse Values" sections
             - "Old Fuse values" and "new Fuse Values or requested Fuse Values" sections
             - Hex values or decimal values for the fuses
             - Problem statements and functionality descriptions
-            - Die/component information in the title (IO die, CPU die, compute die etc.)
+            - Die/component information in the title and description (socket0.io0, socket0.io1, socket0.compute0, socket0.compute1 etc)
             - Component names like punit, pcode, uncore, core, media, SOC, memory, CXL, PCIE etc"""
             
             # Use OpenAI to analyze
@@ -208,100 +220,37 @@ class FCCBAnalyzer:
                 })
         
         return results
-    
-    def extract_fuse_pattern_from_text(self, text):
-        """
-        Use regex patterns to extract fuse information from text
-        Enhanced to handle real HSD description formats
-        """
-        if not text:
-            return {}
-            
-        extracted_data = {}
-        text_lower = text.lower()
-        
-        # Enhanced patterns based on actual HSD description format
-        fuse_patterns = {
-            # Match full fuse paths like sv.socket0.io0.fuses.punit_fuses.pcode_sst_bf_config_0_t_throttle
-            "fuse_name_full": r"(sv\.socket\d+\.(?:io\d+|compute\d+)\.fuses\.[a-z_]+\.[a-z0-9_]+)",
-            # Match fuse name only (last part after the dots)
-            "fuse_name": r"fuses\.[a-z_]+\.([a-z0-9_]+)",
-            
-            # Match old/existing values in "Existing Fuse values" section
-            "old_value": r"existing fuse values?\s*([^\n=]+)=\s*(0x[0-9a-f]+)",
-            
-            # Match new/expected values in "Expected Fuse Values" section
-            "new_value": r"expected fuse values?\s*([^\n=]+)=\s*(0x[0-9a-f]+)",
-            # Match component/die information
-            "die_component": r"(?:die|io|compute)[\s:]*(\w+)",
-            
-            # Match socket information
-            "socket": r"socket(\d+)",
-        }
-        
-        # Extract using enhanced patterns
-        for key, pattern in fuse_patterns.items():
-            matches = re.findall(pattern, text_lower, re.IGNORECASE | re.MULTILINE)
-            if matches:
-                if key in ["fuse_name_full", "fuse_name", "old_value", "new_value"]:
-                    # Take the first match for these single-value fields
-                    extracted_data[key] = matches[0]
-                else:
-                    # Take all matches for multi-value fields
-                    extracted_data[key] = matches
-        logger.info(f" \n Extracted fuse patterns for new fuse value: {extracted_data} \n ")
-        # Additional specific extraction for the example format
-        # Look for the specific pattern in the provided example
-        specific_patterns = {
-            # sv.socket0.io0.fuses.punit_fuses.pcode_sst_bf_config_0_t_throttle = 0x5
-            # sv.socket0.compute0.fuses.punit_fuses.pcode_sst_bf_config_0_t_throttle = 0x5
-            "existing_fuse_line": r"(sv\.socket\d+\.(?:io\d+|compute\d+)\.fuses\.[a-z_]+\.[a-z0-9_]+)\s*=\s*(0x[0-9a-f]+)",
-            
-            # Extract problem description
-            "problem_statement": r"problem statement:?\s*([^()]+?)(?:\(|$)",
-            
-            # Extract functionality description
-            "functionality": r"describe the functionality[^:]*:\s*([^()]+?)(?:\(|$)",
-            
-            # Extract motivation/justification
-            "motivation": r"justify.*?motivation[^:]*:\s*([^()]+?)(?:\(|$)",
-        }
-        
-        for key, pattern in specific_patterns.items():
-            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
-            if match:
-                if key == "existing_fuse_line":
-                    extracted_data["full_fuse_path"] = match.group(1)
-                    extracted_data["existing_value"] = match.group(2)
-                else:
-                    extracted_data[key] = match.group(1).strip()
-        
-        # Try to extract the specific fuse change from the example
-        fuse_change_pattern = r"existing fuse values?\s*([^=]+)=\s*(0x[0-9a-f]+).*?expected fuse values?\s*([^=]+)=\s*(0x[0-9a-f]+)"
-        fuse_match = re.search(fuse_change_pattern, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
-        
-        if fuse_match:
-            extracted_data["existing_fuse_name"] = fuse_match.group(1).strip()
-            extracted_data["existing_fuse_value"] = fuse_match.group(2)
-            extracted_data["expected_fuse_name"] = fuse_match.group(3).strip()
-            extracted_data["expected_fuse_value"] = fuse_match.group(4)
-        
-        # Extract the final fuse name from the full path
-        if "full_fuse_path" in extracted_data:
-            fuse_path_parts = extracted_data["full_fuse_path"].split(".")
-            if len(fuse_path_parts) > 0:
-                extracted_data["final_fuse_name"] = fuse_path_parts[-1]
-        
-        # Clean up and format the extracted data
-        cleaned_data = {}
-        for key, value in extracted_data.items():
-            if isinstance(value, str):
-                cleaned_data[key] = value.strip()
+
+def parse_ai_analysis(ai_analysis):
+    """
+    Parse AI analysis response which may be in different formats
+    """
+    if isinstance(ai_analysis, dict):
+        # If it's already a dict, check for different response formats
+        if "analysis" in ai_analysis and isinstance(ai_analysis["analysis"], str):
+            # Extract JSON from markdown-wrapped string
+            analysis_text = ai_analysis["analysis"]
+            # Remove markdown code blocks if present
+            if "```json" in analysis_text:
+                # Extract JSON content between ```json and ```
+                start = analysis_text.find("```json") + 7
+                end = analysis_text.rfind("```")
+                json_text = analysis_text[start:end].strip()
             else:
-                cleaned_data[key] = value
+                json_text = analysis_text
+            
+            try:
+                return json.loads(json_text)
+            except json.JSONDecodeError:
+                return {"error": "Failed to parse JSON from analysis"}
         
-        return cleaned_data
+        elif "analysis" in ai_analysis and isinstance(ai_analysis["analysis"], dict):
+            return ai_analysis["analysis"]
+        else:
+            # Return as-is if it's already in the expected format
+            return ai_analysis
     
+    return {"error": "Invalid AI analysis format"}
 
 def fccb_analysis_app():
     """
@@ -352,14 +301,16 @@ def fccb_analysis_app():
         if hsd_id:
             with st.spinner(f"Analyzing HSD {hsd_id}..."):
                 # Extract HSD data
-                hsd_data = analyzer.extract_fuse_data_from_hsd(hsd_id)
-                logger.info(f"Extracted HSD data: {hsd_data} \n\n")
-                # Analyze with AI
-                ai_analysis = analyzer.analyze_fuse_changes_with_ai(hsd_data)
+                # hsd_data = analyzer.extract_fuse_data_from_hsd(hsd_id)
+                # logger.info(f"Extracted HSD data: {hsd_data} \n\n")
+                # # Analyze with AI
+                # ai_analysis = analyzer.analyze_fuse_changes_with_ai(hsd_data)
 
-                logger.info(f"AI Analysis results: {ai_analysis}")
-                # Display results
-                display_fccb_analysis_results(hsd_id, hsd_data, ai_analysis)
+                # logger.info(f"AI Analysis results: {ai_analysis}")
+                # # Display results
+                # display_fccb_analysis_results(hsd_id, hsd_data, ai_analysis)
+                results = analyzer.process_multiple_fccb_hsds([hsd_id])
+                display_multiple_results(results)
         else:
             st.warning("Please enter an HSD ID")
     
@@ -433,50 +384,61 @@ def display_multiple_results(results):
     Display results for multiple HSDs
     """
     st.header(f"📊 Multiple HSD Analysis Results ({len(results)} HSDs)")
-    
-    # Create summary table
-    summary_data = []
-    for result in results:
-        hsd_id = result.get("hsd_id", "Unknown")
+    try:
+        # Create summary table
+        summary_data = []
+        for result in results:
+            hsd_id = result.get("hsd_id", "Unknown")
+            logger.info(f"Processing HSD {hsd_id}")
+            if "error" in result:
+                summary_data.append({
+                    "HSD ID": hsd_id,
+                    "Fuse Name": "Error",
+                    "Die/Component": "Error",
+                    "Old Value": "Error",
+                    "New Value": "Error",
+                    "Status": f"Error: {result['error']}"
+                })
+            else:
+                ai_analysis = result.get("ai_analysis", {})
+                # Parse the AI analysis to extract actual data
+                parsed_analysis = parse_ai_analysis(ai_analysis)
+
+                # logger.info(f"Processing HSD {hsd_id} with AI analysis: {ai_analysis}")
+                # logger.info(f"\n Parsed analysis: {parsed_analysis}")
+                # st.write(f"parsed: {parsed_analysis}")
+                summary_data.append({
+                    "HSD ID": hsd_id,
+                    "Fuse Name": parsed_analysis.get("fuse_name", "Not found"),
+                    "Die/Component": parsed_analysis.get("die_component", "Not found"),
+                    "Old Value": parsed_analysis.get("old_value", "Not found"),
+                    "New Value": parsed_analysis.get("new_value", "Not found"),
+                    "Status": "Success" if "error" not in parsed_analysis else "Parse Error"
+                })
+
         
-        if "error" in result:
-            summary_data.append({
-                "HSD ID": hsd_id,
-                "Fuse Name": "Error",
-                "Die/Component": "Error",
-                "Old Value": "Error",
-                "New Value": "Error",
-                "Status": f"Error: {result['error']}"
-            })
-        else:
-            ai_analysis = result.get("ai_analysis", {})
-            summary_data.append({
-                "HSD ID": hsd_id,
-                "Fuse Name": ai_analysis.get("fuse_name", "Not found"),
-                "Die/Component": ai_analysis.get("die_component", "Not found"),
-                "Old Value": ai_analysis.get("old_value", "Not found"),
-                "New Value": ai_analysis.get("new_value", "Not found"),
-                "Status": "Success" if "error" not in ai_analysis else "AI Error"
-            })
-    
-    # Display summary table
-    df = pd.DataFrame(summary_data)
-    st.dataframe(df, use_container_width=True)
-    
-    # Download results
-    csv = df.to_csv(index=False)
-    st.download_button(
-        label="📥 Download Results as CSV",
-        data=csv,
-        file_name=f"fccb_analysis_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv"
-    )
-    
-    # Detailed results in expander
-    with st.expander("View Detailed Results"):
-        for i, result in enumerate(results):
-            st.subheader(f"HSD {result.get('hsd_id', f'#{i+1}')}")
-            st.json(result)
+        # Display summary table
+        df = pd.DataFrame(summary_data)
+        st.dataframe(df, use_container_width=True)
+
+        # Download results
+        csv = df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Results as CSV",
+            data=csv,
+            file_name=f"fccb_analysis_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+
+        # Detailed results in expander
+        with st.expander("View Detailed Results"):
+            for i, result in enumerate(results):
+                st.subheader(f"HSD {result.get('hsd_id', f'#{i+1}')}")
+                st.json(result)
+    except Exception as e:
+        st.error(f"Error displaying results: {e}")
+        logger.error(f"Error in displaying multiple results: {e}")
+        logger.error(f"traceback: {traceback.format_exc()}")
 
 def display_query_results(fccb_data):
     """
