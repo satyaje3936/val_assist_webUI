@@ -39,11 +39,10 @@ class FCCBAnalyzer:
                 
             # If query_id is provided, use it; otherwise search for FCCB HSDs
             if query_id:
-                hsd_data = self.hsd_handler.fetch_query_data(query_id)
+                hsd_data = self.hsd_handler.hsd.fetch_query_data(query_id)
             else:
                 # Search for FCCB related HSDs
-                hsd_data = self.hsd_handler.search_hsds(search_term)
-                
+                hsd_data = self.hsd_handler.hsd.search_hsds(search_term) # Need to implement search_hsds in HSDHandler
             return hsd_data
         except Exception as e:
             logger.error(f"Error getting FCCB HSDs: {e}")
@@ -172,13 +171,14 @@ class FCCBAnalyzer:
                 # Now try to parse the response text as JSON
                 try:
                     result = json.loads(response_text)
+                    #st.write(f"Parsed AI analysis result with AI: {result}")
                     return result
                 except json.JSONDecodeError:
                     # If not valid JSON, return as text with structured format
                     return {
-                        "analysis": response_text, 
-                        "format": "text",
-                        "raw_response": response
+                        "analysis": response_text
+                        # "format": "text",
+                        # "raw_response": response
                     }
             else:
                 return {"error": "OpenAI connector not available"}
@@ -189,28 +189,62 @@ class FCCBAnalyzer:
     
     def process_multiple_fccb_hsds(self, hsd_list):
         """
-        Process multiple FCCB HSDs and extract fuse information from all
+        Process multiple FCCB HSDs and extract fuse information for all fuses per die.
+        Each result will have hsd_id, hsd_data, and ai_analysis (one per fuse per die).
         """
         results = []
-        
+
         for hsd_id in hsd_list:
             try:
                 # Get HSD data
                 hsd_data = self.extract_fuse_data_from_hsd(hsd_id)
-                
+
                 # Analyze with AI
                 ai_analysis = self.analyze_fuse_changes_with_ai(hsd_data)
-                
-                # Combine results
-                result = {
-                    "hsd_id": hsd_id,
-                    "hsd_data": hsd_data,
-                    "ai_analysis": ai_analysis,
-                    "processed_at": datetime.now().isoformat()
-                }
-                
-                results.append(result)
-                
+                #logger.info(f"\n\nAI Analysis results for HSD {hsd_id}: {ai_analysis}\n\n")
+                parsed_analysis = parse_ai_analysis(ai_analysis)
+                #st.write(parsed_analysis)
+                if not parsed_analysis:
+                    return
+                # Normalize ai_analysis to a list of fuse/die dicts
+                fuse_analyses = []
+
+                # If ai_analysis is a list, assume each entry is a fuse/die dict
+                if isinstance(ai_analysis, list):
+                    fuse_analyses = ai_analysis
+                # If ai_analysis is a dict and contains a list of fuses (common OpenAI pattern)
+                elif isinstance(ai_analysis, dict):
+                    # If top-level is a dict with a "fuses" or "fuse_changes" key
+                    if "fuses" in ai_analysis and isinstance(ai_analysis["fuses"], list):
+                        fuse_analyses = ai_analysis["fuses"]
+                    elif "fuse_changes" in ai_analysis and isinstance(ai_analysis["fuse_changes"], list):
+                        fuse_analyses = ai_analysis["fuse_changes"]
+                    # If die_component is a list, split into multiple dicts
+                    elif isinstance(ai_analysis.get("die_component"), list):
+                        for die_comp in ai_analysis["die_component"]:
+                            analysis_copy = ai_analysis.copy()
+                            analysis_copy["die_component"] = die_comp
+                            fuse_analyses.append(analysis_copy)
+                    # If dict looks like a single fuse/die, wrap in list
+                    elif "fuse_name" in ai_analysis or "die_component" in ai_analysis:
+                        fuse_analyses = [ai_analysis]
+                    else:
+                        # Unknown structure, wrap as is
+                        fuse_analyses = [ai_analysis]
+                else:
+                    # Unknown type, wrap as is
+                    fuse_analyses = [ai_analysis]
+
+                # Add each fuse/die analysis as a separate result
+                for analysis in fuse_analyses:
+                    result = {
+                        "hsd_id": hsd_id,
+                        "hsd_data": hsd_data,
+                        "ai_analysis": analysis,
+                        "processed_at": datetime.now().isoformat()
+                    }
+                    results.append(result)
+
             except Exception as e:
                 logger.error(f"Error processing HSD {hsd_id}: {e}")
                 results.append({
@@ -218,8 +252,10 @@ class FCCBAnalyzer:
                     "error": str(e),
                     "processed_at": datetime.now().isoformat()
                 })
-        
+
         return results
+                
+
 
 def parse_ai_analysis(ai_analysis):
     """
@@ -240,15 +276,22 @@ def parse_ai_analysis(ai_analysis):
                 json_text = analysis_text
             
             try:
-                return json.loads(json_text)
-            except json.JSONDecodeError:
-                return {"error": "Failed to parse JSON from analysis"}
+                parsed_data = json.loads(json_text)
+                # Return the parsed data whether it's a list or dict
+                return parsed_data
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON: {e}")
+                return {"error": f"Failed to parse JSON from analysis: {e}"}
         
-        elif "analysis" in ai_analysis and isinstance(ai_analysis["analysis"], dict):
+        elif "analysis" in ai_analysis and isinstance(ai_analysis["analysis"], (dict, list)):
             return ai_analysis["analysis"]
         else:
             # Return as-is if it's already in the expected format
             return ai_analysis
+    
+    elif isinstance(ai_analysis, list):
+        # If it's already a list, return as-is
+        return ai_analysis
     
     return {"error": "Invalid AI analysis format"}
 
@@ -381,7 +424,7 @@ def display_fccb_analysis_results(hsd_id, hsd_data, ai_analysis):
 
 def display_multiple_results(results):
     """
-    Display results for multiple HSDs
+    Display results for multiple HSDs with separate entries for IO die and compute die
     """
     st.header(f"📊 Multiple HSD Analysis Results ({len(results)} HSDs)")
     try:
@@ -389,37 +432,94 @@ def display_multiple_results(results):
         summary_data = []
         for result in results:
             hsd_id = result.get("hsd_id", "Unknown")
+            
             logger.info(f"Processing HSD {hsd_id}")
+            
             if "error" in result:
                 summary_data.append({
                     "HSD ID": hsd_id,
+                    "Die Component": "Error",
                     "Fuse Name": "Error",
-                    "Die/Component": "Error",
                     "Old Value": "Error",
                     "New Value": "Error",
                     "Status": f"Error: {result['error']}"
                 })
             else:
                 ai_analysis = result.get("ai_analysis", {})
+                logger.info(f"Processing HSD {hsd_id} with AI analysis: {ai_analysis}")
+                
                 # Parse the AI analysis to extract actual data
                 parsed_analysis = parse_ai_analysis(ai_analysis)
-
-                # logger.info(f"Processing HSD {hsd_id} with AI analysis: {ai_analysis}")
-                # logger.info(f"\n Parsed analysis: {parsed_analysis}")
-                # st.write(f"parsed: {parsed_analysis}")
-                summary_data.append({
-                    "HSD ID": hsd_id,
-                    "Fuse Name": parsed_analysis.get("fuse_name", "Not found"),
-                    "Die/Component": parsed_analysis.get("die_component", "Not found"),
-                    "Old Value": parsed_analysis.get("old_value", "Not found"),
-                    "New Value": parsed_analysis.get("new_value", "Not found"),
-                    "Status": "Success" if "error" not in parsed_analysis else "Parse Error"
-                })
+                logger.info(f"Parsed analysis: {parsed_analysis}")
+                
+                # Check if parsed_analysis is valid (not None and not an error dict)
+                is_valid_analysis = (
+                    parsed_analysis and 
+                    not (isinstance(parsed_analysis, dict) and parsed_analysis.get("error"))
+                )
+                
+                if is_valid_analysis:
+                    # Check if parsed_analysis is a list (multiple fuses)
+                    if isinstance(parsed_analysis, list):
+                        fuses_list = parsed_analysis
+                    else:
+                        # Single fuse - wrap in list for consistent processing
+                        fuses_list = [parsed_analysis]
+                    
+                    # Process each fuse in the list
+                    for fuse_data in fuses_list:
+                        if isinstance(fuse_data, dict):
+                            summary_data.append({
+                                "HSD ID": hsd_id,
+                                "Die Component": fuse_data.get("die_component", "Not found"),
+                                "Fuse Name": fuse_data.get("fuse_name", "Not found"),
+                                "Old Value": fuse_data.get("old_value", "Not found"),
+                                "New Value": fuse_data.get("new_value", "Not found"),
+                                "Status": "Success"
+                            })
+                        else:
+                            logger.warning(f"Unexpected fuse data format: {fuse_data}")
+                            summary_data.append({
+                                "HSD ID": hsd_id,
+                                "Die Component": "Parse error",
+                                "Fuse Name": "Parse error",
+                                "Old Value": "Parse error",
+                                "New Value": "Parse error",
+                                "Status": "Parse Error"
+                            })
+                else:
+                    # Parse error
+                    if isinstance(parsed_analysis, dict):
+                        error_msg = parsed_analysis.get("error", "Unknown parse error")
+                    else:
+                        error_msg = "No analysis data" if not parsed_analysis else "Invalid analysis format"
+                    
+                    summary_data.append({
+                        "HSD ID": hsd_id,
+                        "Die Component": "Parse error",
+                        "Fuse Name": "Parse error",
+                        "Old Value": "Parse error",
+                        "New Value": "Parse error",
+                        "Status": f"Parse Error: {error_msg}"
+                    })
 
         
         # Display summary table
         df = pd.DataFrame(summary_data)
         st.dataframe(df, use_container_width=True)
+
+        # Show statistics
+        total_hsds = len(results)
+        successful_hsds = len([r for r in results if "error" not in r])
+        total_entries = len(summary_data)
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("📊 Total HSDs", total_hsds)
+        with col2:
+            st.metric("✅ Successful HSDs", successful_hsds)
+        with col3:
+            st.metric("🔧 Summary Entries", total_entries)
 
         # Download results
         csv = df.to_csv(index=False)
@@ -433,8 +533,60 @@ def display_multiple_results(results):
         # Detailed results in expander
         with st.expander("View Detailed Results"):
             for i, result in enumerate(results):
-                st.subheader(f"HSD {result.get('hsd_id', f'#{i+1}')}")
-                st.json(result)
+                hsd_id = result.get("hsd_id", f"#{i+1}")
+                st.subheader(f"HSD: {hsd_id}")
+                
+                # Show parsed analysis in a more readable format
+                if "error" not in result:
+                    parsed = parse_ai_analysis(result.get("ai_analysis", {}))
+                    # Check if parsed data is valid (handle both dict and list cases)
+                    is_valid_parsed = (
+                        parsed and 
+                        not (isinstance(parsed, dict) and parsed.get("error"))
+                    )
+                    
+                    if is_valid_parsed:
+                        if isinstance(parsed, list):
+                            st.write(f"**Found {len(parsed)} fuses:**")
+                            
+                            # Group by die for better organization
+                            fuses_by_die = {}
+                            for fuse in parsed:
+                                die_component = fuse.get("die_component", "unknown")
+                                if die_component not in fuses_by_die:
+                                    fuses_by_die[die_component] = []
+                                fuses_by_die[die_component].append(fuse)
+                            
+                            for die_component, die_fuses in fuses_by_die.items():
+                                st.write(f"**{die_component}:**")
+                                for j, fuse in enumerate(die_fuses, 1):
+                                    with st.container():
+                                        st.write(f"  **Fuse {j}:**")
+                                        col1, col2 = st.columns(2)
+                                        with col1:
+                                            st.write(f"  - **Name:** {fuse.get('fuse_name', 'N/A')}")
+                                            st.write(f"  - **Old Value:** {fuse.get('old_value', 'N/A')}")
+                                        with col2:
+                                            st.write(f"  - **New Value:** {fuse.get('new_value', 'N/A')}")
+                                            st.write(f"  - **Confidence:** {fuse.get('confidence_score', 'N/A')}")
+                                st.divider()
+                        else:
+                            # Single fuse
+                            st.write("**Single fuse found:**")
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.write(f"- **Name:** {parsed.get('fuse_name', 'N/A')}")
+                                st.write(f"- **Die:** {parsed.get('die_component', 'N/A')}")
+                                st.write(f"- **Old Value:** {parsed.get('old_value', 'N/A')}")
+                            with col2:
+                                st.write(f"- **New Value:** {parsed.get('new_value', 'N/A')}")
+                                st.write(f"- **Reason:** {parsed.get('change_reason', 'N/A')}")
+                                st.write(f"- **Confidence:** {parsed.get('confidence_score', 'N/A')}")
+                
+                # Show raw JSON for debugging
+                with st.expander(f"Raw JSON for HSD {hsd_id}"):
+                    st.json(result)
+                    
     except Exception as e:
         st.error(f"Error displaying results: {e}")
         logger.error(f"Error in displaying multiple results: {e}")
