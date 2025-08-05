@@ -178,6 +178,62 @@ class OpenAIConnector:
         
         gpt_completion = completion.choices[0].message.content
         return gpt_completion
+    
+    def run_system_user_prompt(self, hsd_data, system_prompt, user_prompt):
+        """
+        Run the system and user prompts on the OpenAI model and return the completion message content.
+        
+        Args:
+            system_prompt (str): The system prompt to provide context to the model.
+            user_prompt (str): The user prompt to provide the query to the model.
+        
+        Returns:
+            str: The completion message content from the model.
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt+ "/n" + hsd_data}
+        ]
+        
+        # Estimate tokens before running the prompt
+        estimated_tokens = self.estimate_token_count(messages)
+        logger.info(f"Estimated tokens before run_system_user_prompt: {estimated_tokens}")
+        
+        # Record the start time
+        start_time = time.time()
+        
+        completion = client.chat.completions.create(
+            model=self.deployment_name,
+            messages=messages
+        )
+        
+        # Record the end time
+        end_time = time.time()
+        
+        # Calculate the time taken for the query
+        time_taken = end_time - start_time
+        
+        # Display tokens consumed after completion is received
+        prompt_tokens = completion.usage.prompt_tokens
+        completion_tokens = completion.usage.completion_tokens
+        total_tokens = completion.usage.total_tokens
+        finish_reason = completion.choices[0].finish_reason
+        
+        # Update token counts
+        self.total_prompt_tokens += completion.usage.prompt_tokens
+        self.total_completion_tokens += completion.usage.completion_tokens
+        self.total_hsds_processed += 1
+        
+        logger.info(f" Prompt tokens: {prompt_tokens} | Completion tokens: {completion_tokens} | Total tokens: {total_tokens} | Time taken: {time_taken:.2f} seconds | Finish reason: {finish_reason}")
+        if finish_reason == "length":
+            logger.warning("WARNING: The completion was stopped due to reaching the maximum token limit.")
+        
+        # Log the entire JSON response in DEBUG mode
+        #logger.debug(f"Completion JSON: {json.dumps(completion, indent=4)}")
+        
+        gpt_completion = completion.choices[0].message.content
+        return gpt_completion
+
 
     def run_prompt_with_json(self, hsd_query_data_file, system_prompt, user_action_prompt):
         try:

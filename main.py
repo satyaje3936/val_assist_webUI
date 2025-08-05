@@ -8,7 +8,10 @@ import logging
 # from pages.template import template
 from General import Home, Settings, About  # Import the new pages
 from Tools import Chat_With_AI  # Import the new page
-from Tools import FCCB_Hsd_Analysis  # Import the new page
+#from Tools import FCCB_Hsd_Analysis  # Import the new page
+from Tools import HSD_Query_Summary_App  # Import the new Streamlit HSD app
+from Tools import FCCB_HSD_Query_Summary_App  # Import the new FCCB Streamlit app
+# from Tools import hsd_query_summary  # Commented out: CLI tool, not Streamlit app
 #from pages.Streamlit_Demo import basic_charts, data_tables, interactive_plots, machine_learning, maps_and_geospatial  # Import Streamlit demo pages
 
 # Initialize logger
@@ -27,11 +30,17 @@ app = MultiApp()
 logger.info("Adding Trial test to check Open AI API")
 app.add_app("Tools", "Chat with AI", Chat_With_AI.app)
 
-logger.info("Adding FCCB HSD analysis")
-app.add_app("Tools", "Fuse CCB HSD Analysis", FCCB_Hsd_Analysis.app)
+# logger.info("Adding FCCB HSD analysis")
+# app.add_app("Tools", "Fuse CCB HSD Analysis", FCCB_Hsd_Analysis.app)
 
-# logger.info("Adding BIOS Log Analyzer app")
-# app.add_app("Analyzers", "BIOS Log Analyzer", Bios_Log_Analyzer.app)  # Add the new page
+logger.info("Adding HSD Query Summary app")
+app.add_app("Tools", "HSD Query Summary", HSD_Query_Summary_App.app)  # Add the new Streamlit HSD app
+
+logger.info("Adding FCCB HSD Query Summary app")
+app.add_app("Tools", "FCCB HSD Query Summary", FCCB_HSD_Query_Summary_App.app)  # Add the new FCCB Streamlit app
+
+# logger.info("Adding Sightings(HSD) Summary app")
+# app.add_app("Tools", "Sightings(HSD) Summary", hsd_query_summary.app)  # Add the new page - Commented out: hsd_query_summary.py is a CLI tool, not a Streamlit app
 
 # logger.info("Adding Single HSD Analyzer app")
 # app.add_app("Analyzers", "HSD Analyzer", HSD_Analyzer.app)  # Add the new page
