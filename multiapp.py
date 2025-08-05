@@ -45,8 +45,8 @@ class MultiApp:
         pages_in_section = self.sections[selected_section]
         page_titles = [page["title"] for page in pages_in_section]
 
-        # Handle case where "Fuse CCB HSD Analysis" is not in page_titles
-        default_page = "Fuse CCB HSD Analysis" if "Fuse CCB HSD Analysis" in page_titles else page_titles[0]
+        # Handle case where "FCCB HSD Query Summary" is not in page_titles
+        default_page = "FCCB HSD Query Summary" if "FCCB HSD Query Summary" in page_titles else page_titles[0]
         selected_page = st.sidebar.radio("Choose a Page", page_titles, index=page_titles.index(default_page))
 
         # 3) Find and run the selected page function
